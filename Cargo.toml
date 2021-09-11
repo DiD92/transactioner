@@ -1,7 +1,9 @@
 [package]
 name = "transactioner"
-version = "0.1.0"
+author = "Dídac Sementé Fernández <didac.semente@gmail.com>"
+version = "1.0.0"
 edition = "2018"
+publish = false
 
 [dependencies]
 csv = "1.1"

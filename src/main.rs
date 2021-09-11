@@ -259,6 +259,45 @@ mod test {
     }
 
     #[test]
+    fn happy_path_with_all_types() {
+        let file_path = "test_data/15.csv";
+
+        let expected_results = vec![
+            ClientState {
+                client: 1,
+                available: 100.0,
+                held: 0.0,
+                locked: true,
+            },
+            ClientState {
+                client: 2,
+                available: 135.0,
+                held: 0.0,
+                locked: false,
+            },
+            ClientState {
+                client: 3,
+                available: 100.0,
+                held: 0.0,
+                locked: false,
+            }
+        ];
+
+        let (transaction_vec, client_accounts) =
+            extract_records(file_path).expect("Should have extracted records");
+        assert_eq!(transaction_vec.len(), 15);
+        assert_eq!(client_accounts.len(), 3);
+
+        let mut client_accounts = process_transactions(transaction_vec, client_accounts);
+        assert_eq!(client_accounts.len(), 3);
+
+        client_accounts.sort_by_key(|x| x.client);
+        for i in 0..3 {
+            assert_eq!(client_accounts[i], expected_results[i]);
+        }
+    }
+
+    #[test]
     fn proper_record_extraction() {
         let file_path = "test_data/sample_types.csv";
 
