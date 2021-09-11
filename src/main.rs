@@ -280,7 +280,7 @@ mod test {
                 available: 100.0,
                 held: 0.0,
                 locked: false,
-            }
+            },
         ];
 
         let (transaction_vec, client_accounts) =
