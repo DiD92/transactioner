@@ -1,15 +1,17 @@
+use std::collections::{hash_map::Entry::Occupied, hash_map::Entry::Vacant, HashMap, HashSet};
 use std::env;
 use std::error::Error;
-use std::collections::{HashMap, hash_map::Entry::Vacant, hash_map::Entry::Occupied, HashSet};
 use std::fmt;
 
-use serde::{Deserializer, Deserialize};
+use serde::{Deserialize, Deserializer};
 
 type ClientId = u16;
 type TransactionsWithAccounts = (Vec<Transaction>, HashMap<ClientId, ClientAccount>);
 
 fn transaction_type_deserializer<'de, D>(deserializer: D) -> Result<TransactionType, D::Error>
-    where D: Deserializer<'de> {
+where
+    D: Deserializer<'de>,
+{
     let buf = String::deserialize(deserializer)?;
     match buf.as_str() {
         "deposit" => Ok(TransactionType::Deposit),
@@ -17,7 +19,7 @@ fn transaction_type_deserializer<'de, D>(deserializer: D) -> Result<TransactionT
         "dispute" => Ok(TransactionType::Dispute),
         "resolve" => Ok(TransactionType::Resolve),
         "chargeback" => Ok(TransactionType::Chargeback),
-        _ => Ok(TransactionType::Unknown)
+        _ => Ok(TransactionType::Unknown),
     }
 }
 
@@ -30,7 +32,7 @@ struct Transaction {
     amount: f32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Eq, PartialEq)]
 #[repr(u8)]
 enum TransactionType {
     Deposit = 0,
@@ -38,7 +40,7 @@ enum TransactionType {
     Dispute = 2,
     Resolve = 4,
     Chargeback = 8,
-    Unknown = 16
+    Unknown = 16,
 }
 
 #[derive(Debug, Default)]
@@ -48,7 +50,7 @@ struct ClientAccount {
     held: f32,
     locked: bool,
     transactions: HashMap<u32, f32>,
-    disputed_transactions: HashSet<u32>
+    disputed_transactions: HashSet<u32>,
 }
 
 impl ClientAccount {
@@ -70,7 +72,7 @@ impl ClientAccount {
             TransactionType::Deposit => {
                 self.available += transaction.amount;
                 self.transactions.insert(transaction.tx, transaction.amount);
-            },
+            }
             TransactionType::Withdrawal => {
                 if self.available >= transaction.amount {
                     self.available -= transaction.amount;
@@ -138,7 +140,15 @@ impl From<ClientAccount> for ClientState {
 
 impl fmt::Display for ClientState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{},{:.4},{:.4},{:.4},{}", self.client, self.available, self.held, self.available + self.held, self.locked)
+        write!(
+            f,
+            "{},{:.4},{:.4},{:.4},{}",
+            self.client,
+            self.available,
+            self.held,
+            self.available + self.held,
+            self.locked
+        )
     }
 }
 
@@ -158,7 +168,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn extract_records(file_path: &str) -> Result<TransactionsWithAccounts, Box<dyn Error>> {
-    let mut reader = csv::ReaderBuilder::new().trim(csv::Trim::All).from_path(file_path)?;
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_path(file_path)?;
 
     let mut transaction_vec = Vec::new();
     let mut account_map = HashMap::new();
@@ -176,7 +188,10 @@ fn extract_records(file_path: &str) -> Result<TransactionsWithAccounts, Box<dyn 
     Ok((transaction_vec, account_map))
 }
 
-fn process_transactions(transactions: Vec<Transaction>, mut accounts: HashMap<ClientId, ClientAccount>) -> Vec<ClientState> {
+fn process_transactions(
+    transactions: Vec<Transaction>,
+    mut accounts: HashMap<ClientId, ClientAccount>,
+) -> Vec<ClientState> {
     for transaction in transactions {
         if let Occupied(mut account) = accounts.entry(transaction.client) {
             account.get_mut().apply_transaction(transaction)
@@ -190,5 +205,108 @@ fn print_client_accounts_state(accounts: Vec<ClientState>) {
     println!("client,available,held,total,locked");
     for account in accounts {
         println!("{}", account);
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use float_cmp;
+
+    impl PartialEq for ClientState {
+        fn eq(&self, other: &Self) -> bool {
+            self.client == other.client
+                && float_cmp::approx_eq!(f32, self.available, other.available, epsilon = 0.00001)
+                && float_cmp::approx_eq!(f32, self.held, other.held, epsilon = 0.00001)
+                && self.locked == other.locked
+        }
+    }
+
+    impl Eq for ClientState {}
+
+    impl PartialEq for Transaction {
+        fn eq(&self, other: &Self) -> bool {
+            self.r#type == other.r#type
+                && self.client == other.client
+                && self.tx == other.tx
+                && float_cmp::approx_eq!(f32, self.amount, other.amount, epsilon = 0.00001)
+        }
+    }
+
+    impl Eq for Transaction {}
+
+    #[test]
+    fn happy_path() {
+        let file_path = "test_data/20.csv";
+
+        let expected_result = ClientState {
+            client: 1,
+            available: 55.0,
+            held: 0.0,
+            locked: false,
+        };
+
+        let (transaction_vec, client_accounts) =
+            extract_records(file_path).expect("Should have extracted records");
+        assert_eq!(transaction_vec.len(), 20);
+        assert_eq!(client_accounts.len(), 1);
+
+        let client_accounts = process_transactions(transaction_vec, client_accounts);
+        assert_eq!(client_accounts.len(), 1);
+        assert_eq!(client_accounts[0], expected_result);
+    }
+
+    #[test]
+    fn proper_record_extraction() {
+        let file_path = "test_data/sample_types.csv";
+
+        let expected_transactions = vec![
+            Transaction {
+                r#type: TransactionType::Withdrawal,
+                client: 10,
+                tx: 119,
+                amount: 15.0,
+            },
+            Transaction {
+                r#type: TransactionType::Deposit,
+                client: 13,
+                tx: 131,
+                amount: 15.3,
+            },
+            Transaction {
+                r#type: TransactionType::Dispute,
+                client: 20,
+                tx: 341,
+                amount: 15.5761,
+            },
+            Transaction {
+                r#type: TransactionType::Resolve,
+                client: 15,
+                tx: 391,
+                amount: 415.0,
+            },
+            Transaction {
+                r#type: TransactionType::Chargeback,
+                client: 11,
+                tx: 319,
+                amount: 0.0,
+            },
+            Transaction {
+                r#type: TransactionType::Unknown,
+                client: 41,
+                tx: 531,
+                amount: 165.0,
+            },
+        ];
+
+        let (transaction_vec, client_accounts) =
+            extract_records(file_path).expect("Should have extracted records");
+
+        assert_eq!(transaction_vec.len(), 6);
+        assert_eq!(client_accounts.len(), 6);
+
+        for i in 0..6 {
+            assert_eq!(transaction_vec[i], expected_transactions[i]);
+        }
     }
 }

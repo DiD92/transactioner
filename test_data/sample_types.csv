@@ -1,0 +1,7 @@
+type,       client,  tx, amount
+withdrawal,      10,   119,    15.0
+deposit,         13,   131,   15.3
+dispute,         20,   341,   15.5761
+resolve,         15,   391,   415.0
+chargeback,        11,   319,   0.0
+cas??bck,        41,   531,   165.0
