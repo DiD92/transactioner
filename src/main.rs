@@ -211,13 +211,15 @@ fn print_client_accounts_state(accounts: Vec<ClientState>) {
 #[cfg(test)]
 mod test {
     use super::*;
-    use float_cmp;
+    use float_cmp::approx_eq;
+
+    const EPSILON: f32 = 0.00001;
 
     impl PartialEq for ClientState {
         fn eq(&self, other: &Self) -> bool {
             self.client == other.client
-                && float_cmp::approx_eq!(f32, self.available, other.available, epsilon = 0.00001)
-                && float_cmp::approx_eq!(f32, self.held, other.held, epsilon = 0.00001)
+                && approx_eq!(f32, self.available, other.available, epsilon = EPSILON)
+                && approx_eq!(f32, self.held, other.held, epsilon = EPSILON)
                 && self.locked == other.locked
         }
     }
@@ -229,7 +231,7 @@ mod test {
             self.r#type == other.r#type
                 && self.client == other.client
                 && self.tx == other.tx
-                && float_cmp::approx_eq!(f32, self.amount, other.amount, epsilon = 0.00001)
+                && approx_eq!(f32, self.amount, other.amount, epsilon = EPSILON)
         }
     }
 
