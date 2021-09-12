@@ -70,12 +70,15 @@ impl ClientAccount {
 
         match transaction.r#type {
             TransactionType::Deposit => {
-                self.available += transaction.amount;
-                self.transactions.insert(transaction.tx, transaction.amount);
+                if let Vacant(entry) = self.transactions.entry(transaction.tx) {
+                    self.available += transaction.amount;
+                    entry.insert(transaction.amount);
+                }
             }
-            TransactionType::Withdrawal => {
-                if self.available >= transaction.amount {
+            TransactionType::Withdrawal if self.available >= transaction.amount => {
+                if let Vacant(entry) = self.transactions.entry(transaction.tx) {
                     self.available -= transaction.amount;
+                    entry.insert(-transaction.amount);
                 }
             }
             TransactionType::Dispute => {
@@ -112,7 +115,7 @@ impl ClientAccount {
                     }
                 }
             }
-            TransactionType::Unknown => {
+            _ => {
                 // If a transaction record was malformed, we ignore it.
             }
         }
