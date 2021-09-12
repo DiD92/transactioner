@@ -52,7 +52,7 @@ struct ClientAccount {
     held: f32,
     locked: bool,
     transactions: HashMap<u32, f32, RandomXxHashBuilder64>,
-    disputed_transactions: HashSet<u32>,
+    disputed_transactions: HashSet<u32, RandomXxHashBuilder64>,
 }
 
 impl ClientAccount {
