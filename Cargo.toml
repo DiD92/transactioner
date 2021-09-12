@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 csv = "1.1"
 serde = { version = "1.0", features = ["derive"] }
+twox-hash = "1.6.1"
 
 [dev-dependencies]
 float-cmp = "0.9.0"

@@ -4,9 +4,11 @@ use std::error::Error;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer};
+use twox_hash::RandomXxHashBuilder64;
 
 type ClientId = u16;
-type TransactionsWithAccounts = (Vec<Transaction>, HashMap<ClientId, ClientAccount>);
+type ClientAccounts = HashMap<ClientId, ClientAccount, RandomXxHashBuilder64>;
+type TransactionsWithAccounts = (Vec<Transaction>, ClientAccounts);
 
 fn transaction_type_deserializer<'de, D>(deserializer: D) -> Result<TransactionType, D::Error>
 where
@@ -49,7 +51,7 @@ struct ClientAccount {
     available: f32,
     held: f32,
     locked: bool,
-    transactions: HashMap<u32, f32>,
+    transactions: HashMap<u32, f32, RandomXxHashBuilder64>,
     disputed_transactions: HashSet<u32>,
 }
 
@@ -176,7 +178,7 @@ fn extract_records(file_path: &str) -> Result<TransactionsWithAccounts, Box<dyn 
         .from_path(file_path)?;
 
     let mut transaction_vec = Vec::new();
-    let mut account_map = HashMap::new();
+    let mut account_map: ClientAccounts = ClientAccounts::default();
 
     for entry in reader.deserialize() {
         let transaction: Transaction = entry?;
@@ -193,7 +195,7 @@ fn extract_records(file_path: &str) -> Result<TransactionsWithAccounts, Box<dyn 
 
 fn process_transactions(
     transactions: Vec<Transaction>,
-    mut accounts: HashMap<ClientId, ClientAccount>,
+    mut accounts: ClientAccounts,
 ) -> Vec<ClientState> {
     for transaction in transactions {
         if let Occupied(mut account) = accounts.entry(transaction.client) {
