@@ -40,6 +40,8 @@ The most notable optimization is done in the `TransactionType` enum, which is in
 
 Although not implemented, it could be possible to load the file in chunks, but since a 1.000.000 record CSV barely takes 30 MB, it has not been considered worth it.
 
+In order to attain a higher speed in the hashing rate, the code uses the `twox-hash` crate which implements the `XxHash` algorithm, which gives up being cryptographically secure
+in order to obtain higher hashing rates, which in this application is considered a priority.
 
 ### Maintanabilty
 
