@@ -1,13 +1,16 @@
 [package]
 name = "transactioner"
 authors = ["Dídac Sementé Fernández <didac.semente@gmail.com>"]
-version = "1.1.0"
+version = "2.0.0"
 edition = "2018"
 publish = false
 
 [dependencies]
 csv = "1.1"
+futures = "0.3.17"
+num_cpus = "1.13.0"
 serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 twox-hash = "1.6.1"
 
 [dev-dependencies]

@@ -1,14 +1,18 @@
 use std::collections::{hash_map::Entry::Occupied, hash_map::Entry::Vacant, HashMap, HashSet};
-use std::env;
+use std::{env, fs};
 use std::error::Error;
 use std::fmt;
+use std::sync::{Arc, Mutex};
+use std::path::Path;
 
 use serde::{Deserialize, Deserializer};
+use tokio::runtime::Builder;
 use twox_hash::RandomXxHashBuilder64;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::error::TrySendError;
 
 type ClientId = u16;
 type ClientAccounts = HashMap<ClientId, ClientAccount, RandomXxHashBuilder64>;
-type TransactionsWithAccounts = (Vec<Transaction>, ClientAccounts);
 
 fn transaction_type_deserializer<'de, D>(deserializer: D) -> Result<TransactionType, D::Error>
 where
@@ -25,7 +29,7 @@ where
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Copy, Clone)]
 struct Transaction {
     #[serde(deserialize_with = "transaction_type_deserializer")]
     r#type: TransactionType,
@@ -34,7 +38,7 @@ struct Transaction {
     amount: f32,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Deserialize, Eq, PartialEq, Copy, Clone)]
 #[repr(u8)]
 enum TransactionType {
     Deposit = 0,
@@ -163,53 +167,111 @@ fn main() -> Result<(), Box<dyn Error>> {
     if args.len() != 2 {
         eprintln!("Missing input file, exiting...")
     } else {
-        let file_path = &args[1];
-        let (transaction_vec, client_accounts) = extract_records(file_path)?;
-        let client_accounts = process_transactions(transaction_vec, client_accounts);
-        print_client_accounts_state(client_accounts);
+        let file_path = Path::new(&args[1]).to_owned();
+        let metadata = fs::metadata(&file_path)?;
+
+        if !file_path.exists() {
+            eprintln!("File path is invalid, exiting...");
+
+            return Ok(())
+        }
+
+        // After some profiling, it seems that the general best amount of worker is only 2, the limiting factor in the
+        // code seems to be the speed at which you can read the CSV file, so more threads aren't worth it unless
+        // significant increases in read performance are achieved.
+        let num_workers = 2;
+        // Here we try to estimate the best buffer size taking into account the amount of work each worker is going to process
+        // the more work each worker has assigned the higher the chance a small buffer may be filled before being processed
+        let work_per_worker = ((metadata.len() as usize / num_workers) / 25_000_000) + 1;
+        // Min buffer size is 120KB max size is 60MB
+        let buffer_size = std::cmp::min(10_000 * work_per_worker, 5_000_000);
+
+        eprintln!("Using {} worker thread/s to process {:?} using a channel buffer size of {} Bytes", num_workers, &file_path, buffer_size * std::mem::size_of::<Transaction>());
+
+        let rt = Builder::new_multi_thread()
+            .worker_threads(num_workers + 1)
+            .build()?;
+
+        rt.block_on(async {
+            let mut handle_set = Vec::with_capacity(num_workers);
+            let mut sender_set = Vec::with_capacity(num_workers);
+            let results_vec = Arc::new(Mutex::new(Vec::with_capacity(num_workers)));
+
+            for _ in 0..num_workers {
+                let (tx, mut rx) = tokio::sync::mpsc::channel(buffer_size);
+                sender_set.push(tx);
+                let worker_results_vec = results_vec.clone();
+                handle_set.push(rt.spawn(async move {
+                    let mut account_map = ClientAccounts::default();
+                    while let Some(transaction) = rx.recv().await {
+                        process_transaction(transaction, &mut account_map)
+                    }
+
+                    if let Ok(mut data) = worker_results_vec.lock() {
+                        data.push(account_map.into_values().map(ClientState::from).collect());
+                    }
+                }));
+            }
+
+            handle_set.push(rt.spawn(async move {
+                let _ = extract_records(file_path, num_workers, sender_set).await;
+            }));
+
+            futures::future::join_all(handle_set).await;
+
+            if let Ok(data) = results_vec.lock() {
+                print_client_accounts_state(data.as_ref());
+            };
+        });
     }
 
     Ok(())
 }
 
-fn extract_records(file_path: &str) -> Result<TransactionsWithAccounts, Box<dyn Error>> {
+async fn extract_records<P: AsRef<Path>>(
+    file_path: P,
+    num_workers: usize,
+    sender_vec: Vec<Sender<Transaction>>
+) -> Result<(), Box<dyn Error>> {
     let mut reader = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
         .from_path(file_path)?;
 
-    let mut transaction_vec = Vec::new();
-    let mut account_map: ClientAccounts = ClientAccounts::default();
-
     for entry in reader.deserialize() {
         let transaction: Transaction = entry?;
 
-        if let Vacant(entry) = account_map.entry(transaction.client) {
-            entry.insert(ClientAccount::new(transaction.client));
-        }
+        let worker_index = transaction.client as usize % num_workers;
 
-        transaction_vec.push(transaction);
-    }
-
-    Ok((transaction_vec, account_map))
-}
-
-fn process_transactions(
-    transactions: Vec<Transaction>,
-    mut accounts: ClientAccounts,
-) -> Vec<ClientState> {
-    for transaction in transactions {
-        if let Occupied(mut account) = accounts.entry(transaction.client) {
-            account.get_mut().apply_transaction(transaction)
+        if let Err(e) = sender_vec[worker_index].try_send(transaction) {
+            if let TrySendError::Full(_) = e {
+                eprintln!("Buffer full for worker {}, waiting...", worker_index);
+                sender_vec[worker_index].send(transaction).await?;
+            } else {
+                return Err(Box::new(e));
+            }
         }
     }
 
-    accounts.into_values().map(ClientState::from).collect()
+    Ok(())
 }
 
-fn print_client_accounts_state(accounts: Vec<ClientState>) {
+fn process_transaction(tx: Transaction, accounts: &mut ClientAccounts) {
+    match accounts.entry(tx.client) {
+        Occupied(mut account) => account.get_mut().apply_transaction(tx),
+        Vacant(entry) => {
+            let mut account = ClientAccount::new(tx.client);
+            account.apply_transaction(tx);
+            entry.insert(account);
+        }
+    }
+}
+
+fn print_client_accounts_state(accounts: &[Vec<ClientState>]) {
     println!("client,available,held,total,locked");
-    for account in accounts {
-        println!("{}", account);
+    for account_group in accounts {
+        for account in account_group {
+            println!("{}", account);
+        }
     }
 }
 
@@ -242,8 +304,8 @@ mod test {
 
     impl Eq for Transaction {}
 
-    #[test]
-    fn happy_path() {
+    #[tokio::test]
+    async fn happy_path() {
         let file_path = "test_data/20.csv";
 
         let expected_result = ClientState {
@@ -253,18 +315,34 @@ mod test {
             locked: false,
         };
 
-        let (transaction_vec, client_accounts) =
-            extract_records(file_path).expect("Should have extracted records");
-        assert_eq!(transaction_vec.len(), 20);
-        assert_eq!(client_accounts.len(), 1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
 
-        let client_accounts = process_transactions(transaction_vec, client_accounts);
-        assert_eq!(client_accounts.len(), 1);
-        assert_eq!(client_accounts[0], expected_result);
+        tokio::spawn(async move {
+            extract_records(file_path, 1, vec![tx]).await.expect("Should finish correctly");
+        });
+
+        let mut transaction_vec = Vec::with_capacity(20);
+
+        while let Some(data) = rx.recv().await {
+            transaction_vec.push(data);
+        }
+
+        assert_eq!(transaction_vec.len(), 20);
+
+        let mut accounts = ClientAccounts::default();
+
+        for transactions in transaction_vec {
+            process_transaction(transactions, &mut accounts)
+        }
+
+        let account_states: Vec<ClientState> = accounts.into_values().map(ClientState::from).collect();
+
+        assert_eq!(account_states.len(), 1);
+        assert_eq!(account_states[0], expected_result);
     }
 
-    #[test]
-    fn happy_path_with_all_types() {
+    #[tokio::test]
+    async fn happy_path_with_all_types() {
         let file_path = "test_data/15.csv";
 
         let expected_results = vec![
@@ -288,22 +366,39 @@ mod test {
             },
         ];
 
-        let (transaction_vec, client_accounts) =
-            extract_records(file_path).expect("Should have extracted records");
-        assert_eq!(transaction_vec.len(), 15);
-        assert_eq!(client_accounts.len(), 3);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
 
-        let mut client_accounts = process_transactions(transaction_vec, client_accounts);
-        assert_eq!(client_accounts.len(), 3);
+        tokio::spawn(async move {
+            extract_records(file_path, 1, vec![tx]).await.expect("Should finish correctly");
+        });
 
-        client_accounts.sort_by_key(|x| x.client);
-        for i in 0..3 {
-            assert_eq!(client_accounts[i], expected_results[i]);
+        let mut transaction_vec = Vec::with_capacity(20);
+
+        while let Some(data) = rx.recv().await {
+            transaction_vec.push(data);
         }
+
+        assert_eq!(transaction_vec.len(), 15);
+
+        let mut accounts = ClientAccounts::default();
+
+        for transactions in transaction_vec {
+            process_transaction(transactions, &mut accounts)
+        }
+
+        let mut account_states: Vec<ClientState> = accounts.into_values().map(ClientState::from).collect();
+        account_states.sort_by_key(|x| x.client);
+
+        assert_eq!(account_states.len(), 3);
+        for i in 0..3 {
+            assert_eq!(account_states[i], expected_results[i]);
+        }
+
+
     }
 
-    #[test]
-    fn proper_record_extraction() {
+    #[tokio::test]
+    async fn proper_record_extraction() {
         let file_path = "test_data/sample_types.csv";
 
         let expected_transactions = vec![
@@ -345,12 +440,19 @@ mod test {
             },
         ];
 
-        let (transaction_vec, client_accounts) =
-            extract_records(file_path).expect("Should have extracted records");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+
+        tokio::spawn(async move {
+            extract_records(file_path, 1, vec![tx]).await.expect("Should finish correctly");
+        });
+
+        let mut transaction_vec = Vec::with_capacity(20);
+
+        while let Some(data) = rx.recv().await {
+            transaction_vec.push(data);
+        }
 
         assert_eq!(transaction_vec.len(), 6);
-        assert_eq!(client_accounts.len(), 6);
-
         for i in 0..6 {
             assert_eq!(transaction_vec[i], expected_transactions[i]);
         }
